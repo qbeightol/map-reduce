@@ -4,19 +4,42 @@ module Make (Job : MapReduce.Job) = struct
 
   (* see .mli *)
   let run r w =
-    WorkerRequest.receive r >>= function
-    | `Eof -> return ()
-    | `Ok m -> begin
-      match m with
-        MapRequest j ->
-          Job.map j >>= function
-          | [] -> return ()
-          | kvp -> WorkerResponse.send w kvp
-      | ReduceRequest kvp ->
-        Job.reduce kvp >>= function
-        | out -> WorkerResponse.send w out
-    end
+  (*At some point, we'll need to use mapReduce.get_job on the job name sent to
+  the worker. Then we can make modules out of the WorkerRequest and 
+  WorkerResponse functors.*)
 
+  (*Get the job name from the remote controller*)
+  Reader.read_line r 
+  >>= function
+  | `Eof -> return ()
+  | `Ok name -> 
+    match (MapReduce.get_job name) with
+    | None -> return ()
+    | Some (module J : MapReduce.Job) ->
+      begin
+        (*Do i need ins here?*)
+        
+        let module WReq = Protocol.WorkerRequest (J) in
+        let module WResp = Protocol.WorkerResponse (J) in
+
+        WReq.receive r >>= function
+        | `Eof -> return ()
+        | `Ok m -> 
+          begin
+            match m with 
+            | WReq.MapRequest j -> 
+              begin
+                J.map j >>= function
+                | [] -> return ()
+                | kvp -> return (WResp.send w (WResp.MapResult kvp))
+              end
+            | WReq.ReduceRequest (k, is) -> 
+              begin
+                J.reduce (k,is) >>= function
+                | out -> return (WResp.send w (WResp.ReduceResult out))
+              end
+          end
+      end 
 end
 
 (* see .mli *)
