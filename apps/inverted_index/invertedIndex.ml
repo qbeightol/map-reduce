@@ -43,7 +43,7 @@ let () = MapReduce.register_job (module Job)
 (** {2 The Inverted Index App}                                                *)
 (******************************************************************************)
 
-module App  = structv
+module App  = struct
 
   let name = "index"
 
