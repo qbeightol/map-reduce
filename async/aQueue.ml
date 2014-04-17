@@ -11,10 +11,6 @@ let create () =
 (* see .mli *)
 let push (q: 'a t) x =
     match q with (_, w) -> 
-        (*Hopefully, using write_without_pushback doesn't cause any problems; 
-        I'm pretty certain that we don't care about the pushback, and I doubt 
-        that will get in trouble,  since we only write when we know the pipe is
-        open*)
         if not (Pipe.is_closed w) then Pipe.write_without_pushback w x 
         else raise Closed_queue
 
