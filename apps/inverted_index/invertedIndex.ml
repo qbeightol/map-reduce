@@ -18,18 +18,20 @@ module Job = struct
 
   let name = "index.job"
 
+  (*reads the file associated with input (which is a filename) and returns a 
+  list of (word, filename). The list may contain duplicates.*)
   let map (input : input): (key * inter) list Deferred.t =
     (Reader.file_contents input) 
     >>= fun txt ->
       let words = AppUtils.split_words txt in
         return (List.map (fun x -> (x, input)) words)
 
+  (*removes duplicates from the list of intermediate values*)
   let reduce (key, inters) : output Deferred.t =
-    (*get rid of duplicates*)
-    let rec reduce_helper inters : inter list =
-      match inters with
+    let rec reduce_helper intrs : inter list =
+      match intrs with
       | [] -> []
-      | hd::tl -> hd::(reduce_helper (List.filter ((=) hd) tl))
+      | hd::tl -> hd::(reduce_helper (List.filter ((<>) hd) tl))
     in return (reduce_helper inters)
 end
 
@@ -41,7 +43,7 @@ let () = MapReduce.register_job (module Job)
 (** {2 The Inverted Index App}                                                *)
 (******************************************************************************)
 
-module App  = struct
+module App  = structv
 
   let name = "index"
 
