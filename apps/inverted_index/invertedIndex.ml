@@ -19,10 +19,10 @@ module Job = struct
   let name = "index.job"
 
   let map (input : input): (key * inter) list Deferred.t =
-    (*Can I use split_words this way?*)
-    (Reader.file_contents input) >>= (fun txt ->
+    (Reader.file_contents input) 
+    >>= fun txt ->
       let words = AppUtils.split_words txt in
-        return (List.map (fun x -> (x, input)) words))
+        return (List.map (fun x -> (x, input)) words)
 
   let reduce (key, inters) : output Deferred.t =
     (*get rid of duplicates*)
@@ -60,7 +60,6 @@ module App  = struct
       f and the contents of the file named by f.  *)
   let read (master_file : filename) : (filename * string) list Deferred.t =
     Reader.file_lines master_file >>= fun filenames ->
-
     Deferred.List.map filenames (fun filename ->
       Reader.file_contents filename >>= fun contents ->
       return (filename, contents)
