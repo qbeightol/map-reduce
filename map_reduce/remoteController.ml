@@ -15,8 +15,8 @@ let init addrs =
 (*removes an address from the list of valid addresses; if this list becomes 
 empty--which would imply that the remoteController has run out of workers, this
 function will raise an InfrastructureFailure exception*)
-let remove_bad_addr (r,w) =
-    valid_workers := List.filter ((<>) (r,w)) (!valid_workers);
+let remove_bad_addr a =
+    valid_workers := List.filter ((<>) a) (!valid_workers);
     match (!valid_workers) with
     | [] -> raise InfrastructureFailure
     | _ -> ()
