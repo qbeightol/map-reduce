@@ -4,32 +4,22 @@ module Make (Job : MapReduce.Job) = struct
 
   (* see .mli *)
   let run r w =
-    print_endline "I'm doing something!";
-    
-
     let module WReq = Protocol.WorkerRequest (Job) in
     let module WResp = Protocol.WorkerResponse (Job) in
 
     let rec process_requests () : unit Deferred.t =
-      print_endline "waiting for message";
       WReq.receive r >>= function
-      | `Eof -> print_endline "end of file"; return ()
+      | `Eof -> return ()
       | `Ok m ->
-        print_endline "received message"; 
         begin
           match m with 
           | WReq.MapRequest j -> 
-            print_endline "got MapRequest";
             begin
-              print_endline "processing MapRequest";
               (Job.map j) >>= function
-              | [] -> print_endline "MapRequest contained an empty list"; return ()
               | kvp -> process_requests (WResp.send w (WResp.MapResult kvp))
             end
           | WReq.ReduceRequest (k, is) -> 
-            print_endline "got ReduceRequest";
             begin
-              print_endline "processing ReduceRequest";
               Job.reduce (k,is) >>= function
               | out -> process_requests (WResp.send w (WResp.ReduceResult out))
             end

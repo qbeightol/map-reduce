@@ -59,37 +59,87 @@ let print_results results : unit =
 (******************************************************************************)
 
 module Job1 = struct
-  type input
-  type key
-  type inter
-  type output
+  type offset = int
+  type kmer = string
+
+  type input = sequence
+  type key = kmer 
+  type inter = (sequence * offset)
+  type output = result list
 
   let name = "dna.job1"
 
-  let map input : (key * inter) list Deferred.t =
-    failwith "Heavy decibels are playing on my guitar / We got deferred dot ts coming up through the code"
+  let k = 10
+
+  let pull_kmer (offset: int) (k: int) (seq: sequence) : (key * inter) =
+    (String.sub (seq.data) offset k, (seq, offset))
+
+  let map (input: input) : (key * inter) list Deferred.t =
+    let rec extract_kmers (start: int) (seq: sequence) =
+      if start = ((String.length (seq.data)) -k +1) then []
+      else (pull_kmer start k seq)::(extract_kmers (start + 1) seq)
+    in return (extract_kmers 0 input)
 
   let reduce (key, inters) : output Deferred.t =
-    failwith "We're just listening to the rock that's giving too much noise / Are you deaf you wanna hear some more?"
+    let p ((s: sequence), (o: offset)) = (s.kind == Ref) in
+    let (refs, reads) = List.partition p inters in
+    let f1 (ref_s, ref_o) = 
+      let f2 (read_s, read_o) = {length=k; read=read_s.id; read_off=read_o;
+                                              ref=ref_s.id; ref_off= ref_o}
+      in List.map f2 reads
+    in return (List.flatten (List.map f1 refs))
 end
 
 let () = MapReduce.register_job (module Job1)
 
 
-
 module Job2 = struct
-  type input
-  type key
-  type inter
-  type output
+
+  type kmer = string
+  type input = kmer * (result list)
+  type key = (id * id)
+  type inter = result
+  type output = result list
+
+  type comp = Lt | Eq | Gt
 
   let name = "dna.job2"
 
-  let map input : (key * inter) list Deferred.t =
-    failwith "Well, I asked you if you wanted any memory and refs / You said you wanted functional data types instead"
+  let map ((kmer: kmer), (ilst: result list)) : (key * inter) list Deferred.t =
+    let f input = ((input.read, input.ref), input) in
+    return (List.map f ilst)
 
   let reduce (key, inters) : output Deferred.t =
-    failwith "We're just talking about the future / Forget about the past / I'll always stay functional / It's never gonna segfault, never gonna segfault"
+    let cmp (res1: result) (res2: result) = 
+      let cmp_hlp (res1: result) (res2: result) =
+      let dif1= (res1.ref_off - res1.read_off)
+      and dif2 = (res2.ref_off - res2.read_off) in
+        if dif1 < dif2 then Lt
+        else if dif1 > dif2 then Gt
+          else if res1.ref_off < res2.ref_off then Lt
+            else if res1.ref_off > res2.ref_off then Gt
+              else Eq
+      in match (cmp_hlp res1 res2) with
+      | Lt -> -1
+      | Eq -> 0
+      | Gt -> 1
+    in 
+    let sorted_inters = List.sort cmp inters in
+    let f (acc: result list) (e: result) : result list =
+      match acc with
+      | [] -> [e]
+      | hd::tl ->
+        begin
+          if (e.ref_off <= (hd.ref_off+hd.length))
+            &&((e.read_off <= (hd.read_off+hd.length)))
+            then {length = (e.ref_off + e.length - hd.ref_off);
+                 read = hd.read;
+                 read_off = hd.read_off;
+                 ref = hd.ref;
+                 ref_off = hd.ref_off}::tl
+          else e::acc
+        end
+    in return (List.fold_left f [] sorted_inters)
 end
 
 let () = MapReduce.register_job (module Job2)
@@ -105,7 +155,10 @@ module App  = struct
     module MR2 = Controller(Job2)
 
     let run (input : sequence list) : result list Deferred.t =
-      failwith "Rock 'n roll ain't noise pollution / Rock 'n' roll ain't gonna die / Rock 'n' roll ain't noise pollution / Rock 'n' roll it will survive"
+      (MR1.map_reduce input)
+      >>= MR2.map_reduce
+      >>| (fun lst -> List.flatten (List.map (fun (k,o) -> o) lst))
+
 
     let main args =
       read_files args

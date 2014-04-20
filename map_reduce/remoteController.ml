@@ -4,7 +4,7 @@ exception InfrastructureFailure
 exception MapFailure of string 
 exception ReduceFailure of string 
 
-let worker_q = AQueue.create()
+let worker_q = ref (AQueue.create ())
 let starting_addrs = ref []
 let valid_workers = ref []
 
@@ -16,7 +16,8 @@ let init addrs =
 empty--which would imply that the remoteController has run out of workers, this
 function will raise an InfrastructureFailure exception*)
 let remove_bad_addr a =
-    valid_workers := List.filter ((<>) a) (!valid_workers);
+    let v_workers = !valid_workers in
+    valid_workers := List.filter ((<>) a) (v_workers);
     match (!valid_workers) with
     | [] -> raise InfrastructureFailure
     | _ -> ()
@@ -35,7 +36,7 @@ module Make (Job : MapReduce.Job) = struct
             | Core.Std.Result.Error _ -> ()(*bad connection; don't add to queue*)
             | Core.Std.Result.Ok (r,w) -> 
                 begin 
-                    AQueue.push worker_q (r,w); 
+                    AQueue.push (!worker_q) (r,w); 
                     valid_workers :=  (r,w)::(!valid_workers)
                 end
         in 
@@ -46,7 +47,7 @@ module Make (Job : MapReduce.Job) = struct
     of the workers accesible via the worker queue. Returns the result of f along
     with the reader, writer pair that executed it*)
     let execute f =
-        AQueue.pop worker_q >>=
+        AQueue.pop (!worker_q) >>=
         begin fun (r,w) ->
             try_with (fun () -> f (r,w))
             >>| function
@@ -80,7 +81,7 @@ module Make (Job : MapReduce.Job) = struct
                         end 
                     | WResp.MapResult l -> 
                         begin 
-                            AQueue.push worker_q (r,w); 
+                            AQueue.push (!worker_q) (r,w); 
                             return l
                         end
                 end
@@ -112,7 +113,7 @@ module Make (Job : MapReduce.Job) = struct
                         end 
                     | WResp.ReduceResult l -> 
                         begin
-                            AQueue.push worker_q (r,w); 
+                            AQueue.push (!worker_q) (r,w); 
                             return l
                         end
                 end  
@@ -132,6 +133,9 @@ module Make (Job : MapReduce.Job) = struct
                     (process_intermediate (k, ilst)) 
                     >>= (fun x -> return (k, x)))
                 in Deferred.List.map ~how: `Parallel ~f:f lst))
+        >>| (fun out_list -> 
+            worker_q := AQueue.create(); 
+            out_list)
 
 end
 
