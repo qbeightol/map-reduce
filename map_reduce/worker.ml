@@ -9,15 +9,15 @@ module Make (Job : MapReduce.Job) = struct
     WReq.receive r 
     >>= function 
     | `Eof -> return ()
-    | `Ok (WReq.MapRequest j) -> 
-        Job.map j 
+    | `Ok (WReq.MapRequest input) -> 
+        try Job.map input with _ -> JobFailed (Job.Name ^ ": Map Phase") 
         >>= fun result -> 
           (*once the worker has finished the job, send out the resulting list
             of (key, intermediate value) pairs and process the next request*)
           WResp.send w (WResp.mapResult result);
           process_requests ()
     | `Ok (WReq.ReduceRequest req) -> 
-        Job.reduce req
+        try Job.reduce req with _ -> JobFailed (Job.name ^ ": Reduce Phase")
         >>= fun out -> 
           WResp.send w (WResp.ReduceResult out);
           process_requests ()
