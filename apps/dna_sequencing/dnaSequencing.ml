@@ -69,16 +69,46 @@ module Job1 = struct
 
   let name = "dna.job1"
 
-  let k = 10
+  let k = 10 (*specifies the size of the k-mers*)
 
-  let pull_kmer (offset: int) (k: int) (seq: sequence) : (key * inter) =
-    (String.sub (seq.data) offset k, (seq, offset))
+  (*produces a k-character sub-sequence of [seq] starting at index [i], along 
+    with the tuple ([seq], [i] (so that, later on, we can figure out where the 
+    k-mer came from) *)
+  let get_kmer (seq: sequence) (index: int) : (key * inter) = 
+    String.sub seq.data index k, (seq, i)
 
-  let map (input: input) : (key * inter) list Deferred.t =
-    let rec extract_kmers (start: int) (seq: sequence) =
-      if start = ((String.length (seq.data)) -k +1) then []
-      else (pull_kmer start k seq)::(extract_kmers (start + 1) seq)
-    in return (extract_kmers 0 input)
+  (*moves through the input sequence, producing a list of every contiguous k-mer
+    in the input (along with tags for each k-mer)*)
+  let map (input: input) : (key * inter) list Deferred.t = 
+    let rec traverse i = 
+      if i = (String.lenth (seq.data)) - k + 1 then []
+      else (get_kmer input i)::(traverse (i+1))
+    in traverse 0
+
+  (*produces the cartesian product of l1 and l2 (albeit in an order that's the
+    reverse of the usually ordering); tail-recursive*)
+  let cart_prod l1 l2 = 
+    let f acc e = (List.fold_left (fun acc e' -> (e, e')::acc) acc l2) in 
+    List.fold_left f [] l1
+
+  (*takes a k-mer along with a list of sequences and offsets, and returns a list
+    of possible matches between reads and refs. 
+    Note: the sequences in [inters] could contain multiple reads and refs, so 
+    for any given read/ref, it's necessary to create a match between that
+    read/ref and all the refs/reads in inters. Hence the need to take the 
+    cartesion product of the set of refs and the set of reads. *)
+  let reduce (key, inters) : output Deferred.t = 
+    let is_ref (s, o) = (s.kind = Ref) in
+    let (refs, reads) = List.partion is_ref inters in
+    let prod = cart_prod refs reads in
+    let f ((ref_s, ref_o), (read_s, read_o)) = 
+      {length = k; 
+       read = read_s.id;
+       read_off = read_o;
+       ref = ref_s.id;
+       ref_off = ref_o}
+    in List.map f prod
+
 
   let reduce (key, inters) : output Deferred.t =
     let p ((s: sequence), (o: offset)) = (s.kind == Ref) in
@@ -105,20 +135,61 @@ module Job2 = struct
 
   let name = "dna.job2"
 
-  let map ((kmer: kmer), (ilst: result list)) : (key * inter) list Deferred.t =
-    let f input = ((input.read, input.ref), input) in
-    return (List.map f ilst)
+  (*takes in a kmer and a set of matches produced by the first reduce phase
+    and labels each match with the ref id and read id found in the match*)
+  let map ((k: kmer), (matches: result list)) : (key * inter) list Deferred.t =
+    let f match = ((match.read, match.ref), match) in
+    return (List.map f matches)
+
+  (*thought: if two matches haves an overlap, the the first result (sorted by
+    the location of the read_offset), should also have an earlier ref_offset*)
+  (*I ought to handle corner cases more carefully*)
+
+  (*checks for an overlap between the matches
+    note: assumes that r1.read_off =< r2.read_off*)
+  let overlap (r1: result) (r2: result) : bool =
+    let read_overlap = r2.read_off < r1.read_off + r1.length
+    and ref_overlap = 
+      let (first, second) =
+        if r1.ref_off < r2.ref_off then (r1,r2) else (r2,r1)
+      in first.ref_off < r1.ref_off + r1.length
+    in read_overlap && ref_overlap
+
+  (*takes to results and merges them into a single contiguous result*)
+  let merge (r1: result) (r2: result) : result 
+
+  (*combines adjacent kmer matches*)
+  let reduce (key, inters) : output Deferred.t = 
+    let cmp res1 res2 = compare res1.read_off res2.read_off in
+    let 
+
+  let reduce (key, inters) : output Deferred.t = 
+    let cmp (res1: result) (res2: result) = 
+      compare (res1.read_off, res1.ref_off) (res2.read_off, res2.ref_off)
+    in 
+    let srtd_inters = List.sort cmp inters in
+    let f acc res = 
+      let overlapping_rs = List.partition ()
+
+  let reduce (key, inters) : output Deferred.t = 
+    let cmp (res1: result) (res2: result) = 
+      let dif1 = (res1.ref_off - res1.read_off) 
+      and dif2 = (res2.ref_off - res2.read_off) in
+      compare (dif1, res1.ref_off) (dif2, res2.ref_off)
+    in
+    let sorted_inters = List.sort cmp inters in 
+
 
   let reduce (key, inters) : output Deferred.t =
     let cmp (res1: result) (res2: result) = 
       let cmp_hlp (res1: result) (res2: result) =
-      let dif1= (res1.ref_off - res1.read_off)
-      and dif2 = (res2.ref_off - res2.read_off) in
+        let dif1= (res1.ref_off - res1.read_off)
+        and dif2 = (res2.ref_off - res2.read_off) in
         if dif1 < dif2 then Lt
         else if dif1 > dif2 then Gt
-          else if res1.ref_off < res2.ref_off then Lt
-            else if res1.ref_off > res2.ref_off then Gt
-              else Eq
+        else if res1.ref_off < res2.ref_off then Lt
+        else if res1.ref_off > res2.ref_off then Gt
+        else Eq
       in match (cmp_hlp res1 res2) with
       | Lt -> -1
       | Eq -> 0

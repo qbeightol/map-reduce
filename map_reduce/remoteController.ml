@@ -1,141 +1,135 @@
 open Async.Std
 
-exception InfrastructureFailure
-exception MapFailure of string 
-exception ReduceFailure of string 
+module Make (Job : MapReduce.Job) = struct
+  exception InfrastructureFailure
+  exception MapFailure of string
+  exception ReduceFailure of string
 
-let worker_q = ref (AQueue.create ())
-let starting_addrs = ref []
-let valid_workers = ref []
+  let worker_q = ref (AQueue.create ())
+  let starting_addrs = ref []
+  let valid_workers = ref []
 
-let init addrs = 
-    let store a = starting_addrs :=  a::(!starting_addrs) in 
-        List.iter (store) addrs
+  let init addrs =
+    let store a = starting_addrs :=  a::(!starting_addrs) in
+    List.iter (store) addrs
 
-(*removes an address from the list of valid addresses; if this list becomes 
-empty--which would imply that the remoteController has run out of workers, this
-function will raise an InfrastructureFailure exception*)
-let remove_bad_addr a =
+  (*removes an address from the list of valid addresses; if this list becomes
+  empty--which would imply that the remoteController has run out of workers, this
+  function will raise an InfrastructureFailure exception*)
+  let remove_bad_addr a =
     let v_workers = !valid_workers in
     valid_workers := List.filter ((<>) a) (v_workers);
     match (!valid_workers) with
     | [] -> raise InfrastructureFailure
     | _ -> ()
 
-module Make (Job : MapReduce.Job) = struct
+  module Comb = Combiner.Make (Job)
+  module WReq = Protocol.WorkerRequest (Job)
+  module WResp = Protocol.WorkerResponse (Job)
 
-    module Comb = Combiner.Make (Job)
-    module WReq = Protocol.WorkerRequest (Job)
-    module WResp = Protocol.WorkerResponse (Job)
+(* Utility Functions **********************************************************)
 
-    let start_connections () : unit Deferred.t =
-        let f (s,r,w) = Writer.write_line w (Job.name); (r,w) in
-        let connect (h,p) = 
-            try_with (fun () -> Tcp.connect (Tcp.to_host_and_port h p) >>| f )
-            >>| function
-            | Core.Std.Result.Error _ -> ()(*bad connection; don't add to queue*)
-            | Core.Std.Result.Ok (r,w) -> 
-                begin 
-                    AQueue.push (!worker_q) (r,w); 
-                    valid_workers :=  (r,w)::(!valid_workers)
-                end
-        in 
-        return (!starting_addrs)
-        >>= (fun addrs -> Deferred.List.iter addrs (connect))
+  let start_connections () : unit Deferred.t =
+    (*takes in a socket (ignored), reader, and writer and sends out the Job.name
+      and then returns the reader and writer in a tuple*)
+    let write_job (_,r,w) = Writer.write_line w (Job.name); (r,w) in
+    let connect (h,p) =
+      try_with (fun () -> Tcp.connect (Tcp.to_host_and_port h p) >>| write_job)
+      >>| function
+      | Core.Std.Result.Error _ -> () (*bad connection; don't add to queue*)
+      | Core.Std.Result.Ok worker ->
+          Aqueue.push (!worker_q) worker
+          valid_worker := (r,w)::(!valid_workers)
+    in
+    (return (!starting_addrs)) >>=
+    (fun addrs -> Deferred.List.iter addrs connect)
 
-    (*Executes a function on (s,r,w), a socket, reader, writer tuple using one
-    of the workers accesible via the worker queue. Returns the result of f along
-    with the reader, writer pair that executed it*)
-    let execute f =
-        AQueue.pop (!worker_q) >>=
-        begin fun (r,w) ->
-            try_with (fun () -> f (r,w))
-            >>| function
-            | Core.Std.Result.Error e -> remove_bad_addr (r,w); (None, (r,w))
-            | Core.Std.Result.Ok res -> (Some res, (r,w))
+
+  (*Executes a function on (s,r,w), a socket, reader, writer tuple using one
+  of the workers accesible via the worker queue. Returns the result of f along
+  with the reader, writer pair that executed it*)
+  let execute f =
+    let excute' (r,w) =
+      try_with (fun () -> f (r,w)) >>| function
+      | Core.Std.Result.Error e ->
+          begin
+            remove_bad_addr (r,w); (*remove the worker from queue, so that it*)
+            (None, (r,w))          (*won't be used again*)
+          end
+      | Core.Std.Result.Ok res -> (Some res, (r,w))
+    in
+    AQueue.pop (!worker_q) >>= execute'
+
+  (*looks at the read result from a pipe; if the pipe is closed, this function
+    produces a failure, and otherwise, it returns the value in the pipe*)
+  let check_for_closed_connection = function
+    | `Eof -> failwith "connection was closed unexpetedly"
+    | `Ok v -> v
+
+(* Map Functions **************************************************************)
+
+  (*looks at the contents of a map response, doing error handling if necessary
+    and returning a result otherwise*)
+  let rec process_map_respone input (resp_opt, (r,w)) =
+    match resp_opt with
+    | None -> process_input input (*try processing the input again, but with
+      a different worker (remember that execute will remove the bad worker
+      from the queue )*)
+    | Some (WResp.JobFailed str) -> raise (MapFailure str) (*note that this
+      response isn't the result of a dropped connection, but an issue with
+      the job--raise a failure since throwing a different worker at the
+      problem won't resolve the issue*)
+    | Some (WResp.ReduceResult _ ) ->
+      (*if we get a ReduceResult from a MapRequest, something's off--
+        remove the worker from the queue and try again*)
+        begin
+          remove_bad_addr (r,w);
+          process_input input
+        end
+    | Some (MapResult res) ->
+      (*success--add the worker back to queue, and return the result*)
+        begin
+          AQueue.push (!worker_q) (r,w);
+          return res
         end
 
-    let rec process_input input =
-        let f (r,w) : WResp.t Deferred.t =
-            WReq.send w (WReq.MapRequest input);
-            WResp.receive r
-            >>| begin fun resp ->
-                begin
-                    match resp with
-                    | `Eof -> failwith "connection was closed unexpectedly" 
-                    | `Ok resp -> resp
-                end
-            end 
-        in execute f
-        >>= begin fun (resp_opt, (r,w)) ->
-            match resp_opt with
-            | None -> process_input input
-            | Some x ->
-                begin
-                    match x with
-                    | WResp.JobFailed s -> raise (MapFailure s)
-                    | WResp.ReduceResult _ -> 
-                        begin
-                            remove_bad_addr (r,w);
-                            process_input input
-                        end 
-                    | WResp.MapResult l -> 
-                        begin 
-                            AQueue.push (!worker_q) (r,w); 
-                            return l
-                        end
-                end
-            end
+  and process_input input =
+    let send_and_receive (r,w) =
+      WReq.send w (Wreq.MapRequest input);
+      WResp.receive r >>| check_for_closed_connection
+    in execute send_and_receive >>= process_map_response
 
-    let rec process_intermediate (k, ilst) =
-        let f (r,w) : WResp.t Deferred.t =
-            WReq.send w (WReq.ReduceRequest (k, ilst));
-            WResp.receive r
-            >>| begin fun resp ->
-                begin
-                    match resp with
-                    | `Eof -> failwith "connection was closed unexpectedly" 
-                    | `Ok resp -> resp 
-                end
-            end 
-        in execute f
-        >>= begin fun (resp_opt, (r,w)) ->
-            match resp_opt with
-            | None -> process_intermediate (k, ilst)
-            | Some x ->
-                begin
-                    match x with
-                    | WResp.JobFailed s -> raise (ReduceFailure s)
-                    | WResp.MapResult _ -> 
-                        begin
-                            remove_bad_addr (r,w);
-                            process_intermediate (k, ilst)
-                        end 
-                    | WResp.ReduceResult l -> 
-                        begin
-                            AQueue.push (!worker_q) (r,w); 
-                            return l
-                        end
-                end  
-        end 
+(* Reduce Functions ***********************************************************)
 
-    (*val map_reduce : Job.input list -> (Job.key * Job.output) list Deferred.t*)
-    let map_reduce inputs =
-        (start_connections ())
-        >>= (fun () ->
-            if (!valid_workers) == [] then raise InfrastructureFailure
-            else (return inputs)
-            >>= (fun lst -> 
-                Deferred.List.map ~how: `Parallel ~f: (process_input) lst)  
-            >>| (fun lst -> Comb.combine (List.flatten lst))
-            >>= (fun lst ->
-                let f =  (fun (k, ilst) -> 
-                    (process_intermediate (k, ilst)) 
-                    >>= (fun x -> return (k, x)))
-                in Deferred.List.map ~how: `Parallel ~f:f lst))
-        >>| (fun out_list -> 
-            worker_q := AQueue.create(); 
-            out_list)
+  (*like process_map_response but for reduce responses*)
+  let rec process_reduce_response inter (resp_opt, (r,w)) =
+    match res_opt with
+    | None -> process_intermediate inter
+    | Some (WResp.JobFailed str) -> raise (ReduceFailure str)
+    | Some (WResp.MapResult _) ->
+        remove_bad_Addr (r,w);
+        process_intermediate inter
+    | Some (WResp.ReduceResult  res) ->
+        AQueue.push (!worker_q) (r,w);
+        return res
+
+  and process_intermediate inter =
+    let send_and_receive (r,w) =
+      WReq.sendW (WReq.ReduceRequest inter);
+      WResp.receive r >>| check_for_closed_connection
+    in execute send_and_receive >>= process_reduce_response
+
+(* MapReduce Functions ********************************************************)
+
+  let process_intermediate_output (k, ilist) =
+    process_intermediate (k,ilist) >>= fun x -> return (k,x)
+
+  let map_reduce inputs =
+    if !valid_workers == [] then raise InfrastructureFailure
+    else
+      return inputs >>=
+      Deferred.List.map ~how: `Parellel ~f: process_input >|
+      Deferred.List.map ~how: `Parallel ~f: process_intermediate_output >>|
+      fun out_list -> worker_q := AQueue.create (); out_list
 
 end
-
