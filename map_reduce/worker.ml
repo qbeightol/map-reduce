@@ -3,27 +3,32 @@ open Async.Std
 module Make (Job : MapReduce.Job) = struct
   
   module WReq  = Protocol.WorkerRequest(Job)
-  module WResp = Protocol.WorkerRequest(Job) 
+  module WResp = Protocol.WorkerResponse(Job)
+  
 
-  let rec process_requests () = unit Deferred.t = 
-    WReq.receive r 
-    >>= function 
-    | `Eof -> return ()
-    | `Ok (WReq.MapRequest input) -> 
-        try Job.map input with _ -> JobFailed (Job.Name ^ ": Map Phase") 
-        >>= fun result -> 
-          (*once the worker has finished the job, send out the resulting list
-            of (key, intermediate value) pairs and process the next request*)
-          WResp.send w (WResp.mapResult result);
+  (* see .mli*)
+  let run r w = 
+    let rec process_requests () : unit Deferred.t = 
+      WReq.receive r  >>= function 
+      | `Eof -> return ()
+      | `Ok (WReq.MapRequest input) -> 
+          try_with (fun () -> Job.map input) >>= fun x -> 
+          begin match x with
+          | Core.Std.Ok res -> WResp.send w (WResp.MapResult res)
+          | Core.Std.Error _ -> 
+              WResp.send w (WResp.JobFailed (Job.name ^ ": Map Phase"))
+          end;
           process_requests ()
-    | `Ok (WReq.ReduceRequest req) -> 
-        try Job.reduce req with _ -> JobFailed (Job.name ^ ": Reduce Phase")
-        >>= fun out -> 
-          WResp.send w (WResp.ReduceResult out);
+      | `Ok (WReq.ReduceRequest (k, is)) -> 
+          try_with (fun () -> Job.reduce (k, is)) >>= fun x -> 
+          begin match x with 
+          | Core.Std.Ok res -> WResp.send w (WResp.ReduceResult res);
+          | Core.Std.Error _ -> 
+              WResp.send w (WResp.JobFailed (Job.name ^ ": Reduce Phase"))
+          end;
           process_requests ()
+    in process_requests ()
 
-  (* see .mli *)
-  let run r w = process_requests ()
 end
 
 (* see .mli *)
