@@ -2,8 +2,9 @@
 open Async.Std
 
 type 'a t = 'a Pipe.Reader.t * 'a Pipe.Writer.t
-exception Closed_queue (*shouldn't be thrown--I haven't included any code that
-                  closes pipes--but it's here in case a pipe does get closed*)
+(* shouldn't be thrown---I haven't included any code that 
+ * closes pipes---but it's here in case a pipe does get closed*)
+exception Closed_queue 
 
 (* see .mli *)
 let create () = Pipe.create()
